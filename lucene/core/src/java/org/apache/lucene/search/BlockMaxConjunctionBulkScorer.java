@@ -59,6 +59,27 @@ final class BlockMaxConjunctionBulkScorer extends BulkScorer {
     this.maxDoc = maxDoc;
   }
 
+  public boolean isCompetitiveScore(float score) {
+    return scorable.minCompetitiveScore > 0 || scorable.minCompetitiveScore < score;
+  }
+
+  public float getMaxScore(int windowMin, int windowMax) throws IOException {
+    for (int i = 1; i < scorers.length; ++i) {
+      scorers[i].advanceShallow(windowMin);
+    }
+
+    double maxWindowScore = 0;
+    for (int i = 0; i < scorers.length; ++i) {
+      double maxClauseScore = scorers[i].getMaxScore(windowMax);
+      sumOfOtherClauses[i] = maxClauseScore;
+      maxWindowScore += maxClauseScore;
+    }
+    for (int i = sumOfOtherClauses.length - 2; i >= 0; --i) {
+      sumOfOtherClauses[i] += sumOfOtherClauses[i + 1];
+    }
+    return (float) maxWindowScore;
+  }
+
   @Override
   public int score(LeafCollector collector, Bits acceptDocs, int min, int max) throws IOException {
     collector.setScorer(scorable);
@@ -68,20 +89,7 @@ final class BlockMaxConjunctionBulkScorer extends BulkScorer {
       // Use impacts of the least costly scorer to compute windows
       // NOTE: windowMax is inclusive
       int windowMax = Math.min(scorers[0].advanceShallow(windowMin), max - 1);
-      for (int i = 1; i < scorers.length; ++i) {
-        scorers[i].advanceShallow(windowMin);
-      }
-
-      double maxWindowScore = 0;
-      for (int i = 0; i < scorers.length; ++i) {
-        double maxClauseScore = scorers[i].getMaxScore(windowMax);
-        sumOfOtherClauses[i] = maxClauseScore;
-        maxWindowScore += maxClauseScore;
-      }
-      for (int i = sumOfOtherClauses.length - 2; i >= 0; --i) {
-        sumOfOtherClauses[i] += sumOfOtherClauses[i + 1];
-      }
-      scoreWindow(collector, acceptDocs, windowMin, windowMax + 1, (float) maxWindowScore);
+      scoreWindow(collector, acceptDocs, windowMin, windowMax + 1);
       windowMin = Math.max(lead1.docID(), windowMax + 1);
     }
 
@@ -89,21 +97,29 @@ final class BlockMaxConjunctionBulkScorer extends BulkScorer {
   }
 
   private void scoreWindow(
-      LeafCollector collector, Bits acceptDocs, int min, int max, float maxWindowScore)
+      LeafCollector collector, Bits acceptDocs, int min, int max)
       throws IOException {
-    if (maxWindowScore < scorable.minCompetitiveScore) {
-      // no hits are competitive
-      return;
-    }
-
     if (lead1.docID() < min) {
       lead1.advance(min);
     }
 
-    final double sumOfOtherMaxScoresAt1 = sumOfOtherClauses[1];
+    double sumOfOtherMaxScoresAt1 = 0;
+    boolean hasLoadMaxScore = false;
+    float maxWindowScore = 0;
 
     advanceHead:
     for (int doc = lead1.docID(); doc < max; ) {
+      final boolean hasMinCompetitiveScore = scorable.minCompetitiveScore > 0;
+      if (hasLoadMaxScore == false && hasMinCompetitiveScore) {
+        maxWindowScore = getMaxScore(min, max-1);
+        if (isCompetitiveScore(maxWindowScore) == false) {
+          // no hits are competitive
+          return;
+        }
+        sumOfOtherMaxScoresAt1 = sumOfOtherClauses[1];
+        hasLoadMaxScore = true;
+      }
+
       if (acceptDocs != null && acceptDocs.get(doc) == false) {
         doc = lead1.nextDoc();
         continue;
@@ -113,7 +129,6 @@ final class BlockMaxConjunctionBulkScorer extends BulkScorer {
       // clauses if the total score has no chance of being competitive. This works well because
       // computing a score is usually cheaper than decoding a full block of postings and
       // frequencies.
-      final boolean hasMinCompetitiveScore = scorable.minCompetitiveScore > 0;
       double currentScore;
       if (hasMinCompetitiveScore) {
         currentScore = scorer1.score();
@@ -177,7 +192,7 @@ final class BlockMaxConjunctionBulkScorer extends BulkScorer {
       scorable.score = (float) currentScore;
       collector.collect(doc);
       // The collect() call may have updated the minimum competitive score.
-      if (maxWindowScore < scorable.minCompetitiveScore) {
+      if (isCompetitiveScore(maxWindowScore) == false) {
         // no more hits are competitive
         return;
       }
