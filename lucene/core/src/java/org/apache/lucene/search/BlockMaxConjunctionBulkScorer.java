@@ -60,7 +60,7 @@ final class BlockMaxConjunctionBulkScorer extends BulkScorer {
   }
 
   public boolean isCompetitiveScore(float score) {
-    return scorable.minCompetitiveScore > 0 || scorable.minCompetitiveScore < score;
+    return scorable.minCompetitiveScore <= 0 || scorable.minCompetitiveScore < score;
   }
 
   public float getMaxScore(int windowMin, int windowMax) throws IOException {
